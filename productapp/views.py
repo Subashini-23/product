@@ -8,7 +8,6 @@ from .models import Product, Order
 from .serializers import ProductSerializer, OrderSerializer
 from django.http import JsonResponse
 
-
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
@@ -59,51 +58,6 @@ def get_orders(request):
 
 
 
-def customer_segmentation(request):
-    orders = Order.objects.all().values()
-    df = pd.DataFrame(orders)
-
-    if df.empty:
-        return JsonResponse({"message": "No orders found"}, status=400)
-
-    # Aggregate total quantity of products per customer
-    customer_data = df.groupby('customer_id')['quantity'].sum().reset_index()
-
-    # Apply K-Means clustering
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-    customer_data['cluster'] = kmeans.fit_predict(customer_data[['quantity']])
-
-    # Convert to dictionary
-    result = customer_data.to_dict(orient="records")
-
-    return JsonResponse({"customer_segments": result}, safe=False)
-
-
-
-def product_recommendations(request):
-    orders = Order.objects.all().values()
-    df = pd.DataFrame(orders)
-
-    if df.empty:
-        return JsonResponse({"message": "No orders found"}, status=400)
-
-    # Convert orders into transaction format (list of purchased products per customer)
-    transactions = df.groupby("customer_id")["product_name"].apply(list).tolist()
-
-    # Encode data
-    te = TransactionEncoder()
-    te_ary = te.fit(transactions).transform(transactions)
-    df_encoded = pd.DataFrame(te_ary, columns=te.columns_)
-
-    # Apply Apriori algorithm
-    frequent_itemsets = apriori(df_encoded, min_support=0.1, use_colnames=True)
-    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1)
-
-    recommendations = rules[['antecedents', 'consequents', 'support', 'confidence']].to_dict(orient="records")
-
-    return JsonResponse({"recommendations": recommendations}, safe=False)
-
-
 def predict_previous_orders(request):
     customer_id = request.GET.get("customer_id")
     if not customer_id:
@@ -131,3 +85,105 @@ def suggest_remaining_products(request):
 
     return JsonResponse({"suggested_products": suggested_products}, safe=False)
 
+
+
+
+
+def customer_segmentation():
+    # Fetch order data from database
+    orders = Order.objects.all()
+    data = {}
+
+    # Create a dictionary where keys are customers and values are purchased products
+    for order in orders:
+        if order.customer_id not in data:
+            data[order.customer_id] = []
+        data[order.customer_id].append(order.product_name)
+
+    # Convert data into a DataFrame
+    df = pd.DataFrame(list(data.items()), columns=['CustomerID', 'Products'])
+    df['Products'] = df['Products'].apply(lambda x: ', '.join(x))
+
+    # Define customer segments based on common product groups
+    segment_map = {
+        'Laptop Buyers': ['Laptop', 'Laptop charger', 'Wired headphone'],
+        'Smartphone Lovers': ['Smartphone', 'Phone charger', 'Wired headphone'],
+       
+    }
+
+    # Assign customers to segments
+    def assign_segment(products):
+        for segment, items in segment_map.items():
+            if any(item in products for item in items):
+                return segment
+        return 'Other'
+
+    df['Segment'] = df['Products'].apply(assign_segment)
+
+    return df.to_dict(orient="records")
+
+def segment_customers(request):
+    result = customer_segmentation()
+    return JsonResponse(result, safe=False)
+
+
+
+def generate_product_recommendations():
+    # Fetch order data
+    orders = Order.objects.all()
+    transactions = {}
+
+    for order in orders:
+        if order.customer_id not in transactions:
+            transactions[order.customer_id] = []
+        transactions[order.customer_id].append(order.product_name)
+
+    # Convert to DataFrame
+    transaction_list = list(transactions.values())
+    te = TransactionEncoder()
+    te_ary = te.fit(transaction_list).transform(transaction_list)
+    df = pd.DataFrame(te_ary, columns=te.columns_)
+
+    # Apply Apriori algorithm
+    frequent_itemsets = apriori(df, min_support=0.5, use_colnames=True)
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.5)
+
+    recommendations = {}
+    for _, row in rules.iterrows():
+        recommendations[row['antecedents']] = {
+            "recommend": list(row['consequents']),
+            "confidence": row['confidence']
+        }
+
+    return recommendations
+
+def recommend_products(request):
+    recommendations = generate_product_recommendations()  # Your recommendation logic
+
+    if isinstance(recommendations, dict):
+        recommendations = {str(key): value for key, value in recommendations.items()}  # Convert frozenset keys to strings
+
+    return JsonResponse({'recommendations': recommendations}, safe=False)
+
+
+def get_personalized_recommendation(customer_id):
+    orders = Order.objects.filter(customer_id=customer_id)
+    purchased_products = [order.product_name for order in orders]
+
+    recommendations = generate_product_recommendations()
+    suggested_products = []
+
+    for product in purchased_products:
+        product_tuple = (product,)
+        if product_tuple in recommendations:
+            suggested_products.append(recommendations[product_tuple]['recommend'][0])
+
+    return suggested_products
+
+def personalized_dashboard(request, customer_id):
+    recommended_products = get_personalized_recommendation(customer_id)
+    
+    return JsonResponse({
+        "message": f"Recommended Products for Customer {customer_id}",
+        "recommendations": recommended_products
+    })
